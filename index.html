@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KampfOS — the computer where code costs coins</title>
+<meta name="description" content="KampfOS: a retro desktop in your browser with its own programming language (KampfScript), a coin economy, and Kompass — a web browser with the Kugel search engine, written in KampfScript.">
+<meta name="theme-color" content="#1b2a8c">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🪙</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Press+Start+2P&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css?v=1">
+<script>
+  window.KAMPFOS_VERSION = '1';
+  // KampfOS only runs on a computer: block phones, tablets and touch-only devices.
+  (function () {
+    var ua = navigator.userAgent || '';
+    var mobileUA = /Android|iPhone|iPad|iPod|Mobile|Silk|Kindle|BlackBerry|BB10|Opera Mini|IEMobile|webOS|Windows Phone/i.test(ua);
+    var iPadOS = /Macintosh/.test(ua) && navigator.maxTouchPoints > 1;
+    var coarseOnly = window.matchMedia && matchMedia('(pointer: coarse)').matches && !matchMedia('(any-pointer: fine)').matches;
+    var smallScreen = Math.min(screen.width, screen.height) < 600;
+    window.KAMPFOS_BLOCKED = mobileUA || iPadOS || coarseOnly || smallScreen;
+  })();
+</script>
+</head>
+<body>
+<div id="mobile-block" hidden>
+  <div class="mb-card">
+    <div class="mb-monitor">🖥️</div>
+    <h1 id="mb-title">THIS SYSTEM ONLY RUNS ON A COMPUTER</h1>
+    <p id="mb-text">KampfOS needs a real keyboard, a mouse and a big screen. Phones and tablets can't afford the CPU tax.</p>
+    <p>Open <b>kampfguy.github.io/kampfos</b> on a laptop or desktop computer.</p>
+    <div class="mb-err">KAMPFOS FATAL ERROR 0xC0FFEE<br>&gt; device_type: <span id="mb-dev">handheld</span><br>&gt; keyboard: not found<br>&gt; mouse: not found<br>&gt; boot aborted. insert computer to continue_</div>
+    <div class="mb-small">🪙 Your coins are safe. Probably.</div>
+  </div>
+</div>
+<div id="boot">KampfOS BIOS v1.0<span class="blink">_</span></div>
+<div id="desktop" hidden>
+  <div id="icons"></div>
+  <div id="windows"></div>
+  <div id="toasts"></div>
+  <div id="start-menu" class="bevel" hidden></div>
+  <div id="taskbar">
+    <button id="start-btn" class="btn"><span class="k">K</span>Start</button>
+    <div id="tasks"></div>
+    <div id="tray"><span id="wallet" title="Wallet — click for details">🪙 <b>0</b></span><span id="clock"></span></div>
+  </div>
+</div>
+<script src="js/lang.js?v=1"></script>
+<script src="js/os.js?v=1"></script>
+<script src="js/apps.js?v=1"></script>
+<script>
+  (function () {
+    var block = document.getElementById('mobile-block');
+    function tooSmall() { return innerWidth < 760 || innerHeight < 480; }
+    function showBlock(kind) {
+      block.hidden = false;
+      document.getElementById('mb-dev').textContent = kind;
+      if (kind === 'window too small') {
+        document.getElementById('mb-title').textContent = 'WINDOW TOO SMALL';
+        document.getElementById('mb-text').textContent = 'KampfOS needs at least 760×480 pixels. Make your browser window bigger.';
+      }
+    }
+    var boot = document.getElementById('boot');
+    if (window.KAMPFOS_BLOCKED) { boot.remove(); showBlock(/iPad|Tablet/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent)) ? 'tablet' : 'phone'); return; }
+    var booted = false;
+    function check() {
+      if (tooSmall()) { showBlock('window too small'); }
+      else { block.hidden = true; if (!booted) { booted = true; OS.boot(); } }
+    }
+    addEventListener('resize', check);
+    check();
+  })();
+</script>
+</body>
+</html>
