@@ -96,20 +96,20 @@ function ddgUrl(href) {
 }
 async function searchDDG(q) {
   const r = await fetch('https://html.duckduckgo.com/html/', {
-    method: 'POST', signal: AbortSignal.timeout(3000),
+    method: 'POST', signal: AbortSignal.timeout(3500),
     headers: { 'User-Agent': BROWSER_UA, 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'text/html', 'Accept-Language': 'en-US,en;q=0.9', 'Referer': 'https://html.duckduckgo.com/' },
     body: 'q=' + encodeURIComponent(q) + '&kl=us-en',
   });
   if (!r.ok) throw new Error('ddg status ' + r.status);
   const html = await r.text();
   const out = [];
-  const parts = html.split(/<div[^>]+class="[^"]*\bresult\b[^"]*"/i).slice(1);
+  const parts = html.split(/(?=<div[^>]+class="[^"]*\bresult\b[^"]*")/i).slice(1);
   for (const part of parts) {
-    if (/result--ad/.test(part.slice(0, 200))) continue;
+    if (/result--ad|badge--ad/.test(part.slice(0, 600))) continue;
     const a = part.match(/<a[^>]+class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i) || part.match(/<a[^>]+href="([^"]+)"[^>]+class="[^"]*result__a[^"]*"[^>]*>([\s\S]*?)<\/a>/i);
     if (!a) continue;
     const url = ddgUrl(decode(a[1]));
-    if (!url || !/^https?:/.test(url)) continue;
+    if (!url || !/^https?:/.test(url) || /^https?:\/\/([^/]*\.)?duckduckgo\.com\//.test(url)) continue;
     const sn = part.match(/class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/(a|div|td)>/i);
     out.push({ title: cleanText(a[2]), url, snippet: sn ? cleanText(sn[1]) : '' });
     if (out.length >= 10) break;
@@ -136,6 +136,14 @@ async function searchDDGLite(q) {
   if (!out.length) throw new Error('ddg-lite returned no results');
   return out;
 }
+async function searchDDGInstant(q) {
+  const r = await fetch('https://api.duckduckgo.com/?format=json&no_html=1&no_redirect=1&t=kampfos&q=' + encodeURIComponent(q), { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(4000) });
+  if (!r.ok) throw new Error('ddg-instant status ' + r.status);
+  const d = JSON.parse(await r.text() || '{}');
+  const out = [];
+  for (const x of d.Results || []) if (x.FirstURL && /^https?:/.test(x.FirstURL)) out.push({ title: (d.Heading ? d.Heading + ' — ' : '') + cleanText(x.Text || 'Official site'), url: x.FirstURL, snippet: cleanText(d.AbstractText || d.Abstract || '').slice(0, 240) });
+  return out;
+}
 async function searchWikipedia(q) {
   const u = 'https://en.wikipedia.org/w/api.php?action=query&list=search&format=json&srlimit=10&srprop=snippet&srsearch=' + encodeURIComponent(q);
   const r = await fetch(u, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(8000) });
@@ -153,7 +161,7 @@ export default {
     if (origin && !ALLOWED_ORIGINS.includes(origin)) return json(req, { ok: false, error: 'Origin not allowed' }, 403);
 
     const cache = caches.default;
-    const cacheKey = new Request(url.toString() + (url.search ? '&' : '?') + '__v=4', { method: 'GET' });
+    const cacheKey = new Request(url.toString() + (url.search ? '&' : '?') + '__v=5', { method: 'GET' });
     if (url.pathname === '/read' || url.pathname === '/search') {
       const hit = await cache.match(cacheKey);
       if (hit) { const h = new Headers(hit.headers); for (const [k, v] of Object.entries(cors(req))) h.set(k, v); h.set('X-Cache', 'HIT'); return new Response(hit.body, { status: hit.status, headers: h }); }
@@ -180,14 +188,20 @@ export default {
         const q = (url.searchParams.get('q') || '').trim().slice(0, 300);
         if (!q) return json(req, { ok: false, error: 'Missing ?q=' }, 400);
         const errors = [];
-        // Fire all engines at once; take the first one (in priority order) that returns results.
-        const engines = [['duckduckgo', searchDDG], ['duckduckgo-lite', searchDDGLite], ['wikipedia', searchWikipedia]];
-        const runs = engines.map(([engine, fn]) => fn(q).then(r => ({ engine, results: r }), e => ({ engine, error: e.message })));
-        for (const p of runs) {
-          const r = await p;
-          if (r.results && r.results.length) return store(json(req, { ok: true, query: q, engine: r.engine, results: r.results, fallbackNotes: errors }));
-          errors.push(r.engine + ': ' + (r.error || 'no results'));
-        }
+        // Fire all engines at once. Prefer full DuckDuckGo results; otherwise merge
+        // DuckDuckGo Instant Answer "official site" links with Wikipedia search.
+        const wrap = (engine, p) => p.then(r => ({ engine, results: r }), e => ({ engine, results: [], error: e.message }));
+        const ddgP = wrap('duckduckgo', searchDDG(q).catch(e => searchDDGLite(q).catch(e2 => { throw new Error(e.message + ' / lite: ' + e2.message); })));
+        const iaP = wrap('duckduckgo-instant', searchDDGInstant(q));
+        const wikiP = wrap('wikipedia', searchWikipedia(q));
+        const ddg = await ddgP;
+        if (ddg.results.length) return store(json(req, { ok: true, query: q, engine: 'duckduckgo', results: ddg.results }));
+        errors.push('duckduckgo: ' + (ddg.error || 'no results'));
+        const [ia, wiki] = await Promise.all([iaP, wikiP]);
+        const seen = new Set(), merged = [];
+        for (const r of [...ia.results, ...wiki.results]) { const k = r.url.replace(/\/$/, ''); if (!seen.has(k)) { seen.add(k); merged.push(r); } }
+        if (ia.error) errors.push('instant: ' + ia.error); if (wiki.error) errors.push('wikipedia: ' + wiki.error);
+        if (merged.length) return store(json(req, { ok: true, query: q, engine: [ia.results.length && 'duckduckgo-instant', wiki.results.length && 'wikipedia'].filter(Boolean).join(' + '), results: merged.slice(0, 12), fallbackNotes: errors }));
         return json(req, { ok: true, query: q, engine: 'none', results: [], errors });
       }
       if (url.pathname === '/' || url.pathname === '/health') return json(req, { ok: true, service: 'kampfos-proxy', endpoints: ['/read?url=', '/search?q='] });
