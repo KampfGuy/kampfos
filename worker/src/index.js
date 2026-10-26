@@ -119,19 +119,21 @@ async function searchDDG(q) {
 }
 async function searchDDGLite(q) {
   const r = await fetch('https://lite.duckduckgo.com/lite/', {
-    method: 'POST', signal: AbortSignal.timeout(3000),
+    method: 'POST', signal: AbortSignal.timeout(3500), signal: AbortSignal.timeout(3000),
     headers: { 'User-Agent': BROWSER_UA, 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'text/html', 'Referer': 'https://lite.duckduckgo.com/' },
     body: 'q=' + encodeURIComponent(q) + '&kl=us-en',
   });
   if (!r.ok) throw new Error('ddg-lite status ' + r.status);
   const html = await r.text();
   const out = [];
-  const re = /<a[^>]+href="([^"]+)"[^>]*class=['"]result-link['"][^>]*>([\s\S]*?)<\/a>[\s\S]*?(?:class=['"]result-snippet['"][^>]*>([\s\S]*?)<\/td>)?/gi;
-  let m;
-  while ((m = re.exec(html)) && out.length < 10) {
+  const links = [...html.matchAll(/<a[^>]+href="([^"]+)"[^>]*class=['"]result-link['"][^>]*>([\s\S]*?)<\/a>/gi)];
+  const snippets = [...html.matchAll(/class=['"]result-snippet['"][^>]*>([\s\S]*?)<\/td>/gi)];
+  for (let i = 0; i < links.length && out.length < 10; i++) {
+    const m = links[i], next = links[i + 1] ? links[i + 1].index : Infinity;
     const url = ddgUrl(decode(m[1]));
-    if (!url || !/^https?:/.test(url)) continue;
-    out.push({ title: cleanText(m[2]), url, snippet: m[3] ? cleanText(m[3]) : '' });
+    if (!url || !/^https?:/.test(url) || /^https?:\/\/([^/]*\.)?duckduckgo\.com\//.test(url)) continue;
+    const sn = snippets.find(x => x.index > m.index && x.index < next);
+    out.push({ title: cleanText(m[2]), url, snippet: sn ? cleanText(sn[1]) : '' });
   }
   if (!out.length) throw new Error('ddg-lite returned no results');
   return out;
@@ -143,6 +145,13 @@ async function searchDDGInstant(q) {
   const out = [];
   for (const x of d.Results || []) if (x.FirstURL && /^https?:/.test(x.FirstURL)) out.push({ title: (d.Heading ? d.Heading + ' — ' : '') + cleanText(x.Text || 'Official site'), url: x.FirstURL, snippet: cleanText(d.AbstractText || d.Abstract || '').slice(0, 240) });
   return out;
+}
+async function liteWithRetry(q) {
+  let last;
+  for (let i = 0; i < 3; i++) {
+    try { return await searchDDGLite(q); } catch (e) { last = e; if (/timeout|abort/i.test(e.message)) break; await new Promise(r => setTimeout(r, 250 + i * 250)); }
+  }
+  throw last;
 }
 async function searchWikipedia(q) {
   const u = 'https://en.wikipedia.org/w/api.php?action=query&list=search&format=json&srlimit=10&srprop=snippet&srsearch=' + encodeURIComponent(q);
@@ -161,7 +170,7 @@ export default {
     if (origin && !ALLOWED_ORIGINS.includes(origin)) return json(req, { ok: false, error: 'Origin not allowed' }, 403);
 
     const cache = caches.default;
-    const cacheKey = new Request(url.toString() + (url.search ? '&' : '?') + '__v=5', { method: 'GET' });
+    const cacheKey = new Request(url.toString() + (url.search ? '&' : '?') + '__v=9', { method: 'GET' });
     if (url.pathname === '/read' || url.pathname === '/search') {
       const hit = await cache.match(cacheKey);
       if (hit) { const h = new Headers(hit.headers); for (const [k, v] of Object.entries(cors(req))) h.set(k, v); h.set('X-Cache', 'HIT'); return new Response(hit.body, { status: hit.status, headers: h }); }
@@ -191,11 +200,11 @@ export default {
         // Fire all engines at once. Prefer full DuckDuckGo results; otherwise merge
         // DuckDuckGo Instant Answer "official site" links with Wikipedia search.
         const wrap = (engine, p) => p.then(r => ({ engine, results: r }), e => ({ engine, results: [], error: e.message }));
-        const ddgP = wrap('duckduckgo', searchDDG(q).catch(e => searchDDGLite(q).catch(e2 => { throw new Error(e.message + ' / lite: ' + e2.message); })));
+        const ddgP = Promise.any([searchDDGLite(q).then(r => ({ engine: 'duckduckgo-lite', results: r })), searchDDG(q).then(r => ({ engine: 'duckduckgo', results: r }))]).catch(agg => ({ engine: 'duckduckgo', results: [], error: (agg.errors || []).map(e => e.message).join(' / ') }));
         const iaP = wrap('duckduckgo-instant', searchDDGInstant(q));
         const wikiP = wrap('wikipedia', searchWikipedia(q));
         const ddg = await ddgP;
-        if (ddg.results.length) return store(json(req, { ok: true, query: q, engine: 'duckduckgo', results: ddg.results }));
+        if (ddg.results.length) return store(json(req, { ok: true, query: q, engine: ddg.engine, results: ddg.results }));
         errors.push('duckduckgo: ' + (ddg.error || 'no results'));
         const [ia, wiki] = await Promise.all([iaP, wikiP]);
         const seen = new Set(), merged = [];
